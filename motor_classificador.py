@@ -1,18 +1,13 @@
 import os
 import json
 import pdfplumber
-import ollama  # Biblioteca do Ollama Local
+from groq import Groq
 from typing import Dict, Any
 
-def obter_caminho_desktop() -> str:
-    desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-    if not os.path.exists(desktop):
-        desktop = os.path.join(os.path.expanduser('~'), 'Área de Trabalho')
-    return desktop
+# Instancia o cliente da Groq (a chave de API fica armazenada em variáveis de ambiente)
+# Para testes locais basta definir: os.environ["GROQ_API_KEY"] = "sua_chave_aqui"
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# ---------------------------------------------------------------------
-# 1. CAMADA DE INGESTÃO: EXTRAÇÃO DO TEXTO DO PDF
-# ---------------------------------------------------------------------
 def extrair_texto_fatura(caminho_pdf: str) -> str:
     if not os.path.exists(caminho_pdf):
         raise FileNotFoundError(f"O ficheiro {caminho_pdf} não foi encontrado.")
@@ -26,13 +21,7 @@ def extrair_texto_fatura(caminho_pdf: str) -> str:
                 
     return texto_completo
 
-# ---------------------------------------------------------------------
-# 2. CAMADA DE INTELIGÊNCIA: CLASSIFICAÇÃO COM LLAMA 3.1 LOCAL
-# ---------------------------------------------------------------------
 def classificar_itens_com_ia(texto_fatura: str) -> Dict[str, Any]:
-    """
-    Envia o texto da fatura para o Llama 3.1 a rodar LOCALMENTE no teu PC.
-    """
     prompt_sistema = """
     Você é um Despachante Alfandegário Especialista em Classificação Fiscal Internacional (Sistema Harmonizado - HS Code e NCM/Taric).
     Sua tarefa é analisar o texto de uma Commercial Invoice, extrair a lista de produtos e determinar a classificação fiscal mais adequada para cada item.
@@ -57,52 +46,20 @@ def classificar_itens_com_ia(texto_fatura: str) -> Dict[str, Any]:
     }
     """
 
-    print("\n[LOCAL AI] Processando no teu Llama 3.1 local... Aguarde alguns segundos...")
-    
     try:
-        # Chamada direta para o teu modelo Local via Ollama
-        response = ollama.chat(
-            model='llama3.1',
+        # Chamada à API da Groq (Executa Llama 3.1 na nuvem em tempo real)
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
             messages=[
-                {'role': 'system', 'content': prompt_sistema},
-                {'role': 'user', 'content': f"Analise esta fatura e devolva APENAS o JSON:\n\n{texto_fatura}"}
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": f"Analise esta fatura e devolva APENAS o JSON:\n\n{texto_fatura}"}
             ],
-            format='json'  # Força o Llama a responder obrigatoriamente em formato JSON estruturado
+            response_format={"type": "json_object"}
         )
         
-        # Converte a resposta em dicionário Python
-        resultado_json = json.loads(response['message']['content'])
+        resultado_json = json.loads(response.choices[0].message.content)
         return resultado_json
 
     except Exception as e:
-        print(f"\n[ERRO LOCAL AI] Falha ao comunicar com o Ollama: {e}")
-        print("Certifica-te de que o Ollama está a correr na tua máquina.")
+        print(f"\n[ERRO GROQ API] Falha no processamento: {e}")
         return {}
-
-# ---------------------------------------------------------------------
-# 3. PIPELINE DE EXECUÇÃO
-# ---------------------------------------------------------------------
-if __name__ == "__main__":
-    desktop = obter_caminho_desktop()
-    caminho_pdf = os.path.join(desktop, "fatura_importacao_exemplo.pdf")
-    
-    print("==========================================================")
-    print("   MIDDLEWARE HS-CODE - MOTOR LOCAL LLAMA 3.1 (OFFLINE)")
-    print("==========================================================")
-    
-    print(f"\n1. Lendo o ficheiro: {caminho_pdf}...")
-    texto_extraido = extrair_texto_fatura(caminho_pdf)
-    print("   [OK] Texto extraído com sucesso do PDF!")
-    
-    print("\n2. Processando com a tua IA Local...")
-    resultado_classificacao = classificar_itens_com_ia(texto_extraido)
-    
-    if resultado_classificacao:
-        print("\n3. RESULTADO PROCESSADO PELA TUA IA LOCAL:\n")
-        print(json.dumps(resultado_classificacao, indent=2, ensure_ascii=False))
-        
-        caminho_json_saida = os.path.join(desktop, "resultado_classificacao.json")
-        with open(caminho_json_saida, "w", encoding="utf-8") as f:
-            json.dump(resultado_classificacao, f, indent=2, ensure_ascii=False)
-            
-        print(f"\n[SUCESSO] Ficheiro guardado em:\n{caminho_json_saida}")
