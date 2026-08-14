@@ -1,13 +1,36 @@
 """
 Módulo de Exportação de Dados e Geração de Relatórios Oficiais de Conformidade
-Gera XML/CSV estruturados para ERPs e Relatórios PDF via WeasyPrint.
+Gera XML/CSV estruturados para ERPs e Relatórios PDF via FPDF2 (Python Puro).
 """
 
 import io
 import json
 import xml.etree.ElementTree as ET
 import pandas as pd
-from weasyprint import HTML
+from fpdf import FPDF
+
+
+class PDFComplianceReport(FPDF):
+    def header(self):
+        # Cabeçalho Escuro Corporativo
+        self.set_fill_color(26, 37, 47)
+        self.rect(0, 0, 210, 30, 'F')
+        
+        self.set_font("Helvetica", "B", 14)
+        self.set_text_color(255, 255, 255)
+        self.set_xy(10, 8)
+        self.cell(0, 8, "CERTIFICADO DE AUDITORIA DE COMPLIANCE", ln=True)
+        
+        self.set_font("Helvetica", "", 9)
+        self.set_text_color(189, 195, 199)
+        self.cell(0, 5, "HS-Code Automator | Middleware Aduaneiro & Multimodal Enterprise", ln=True)
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(148, 163, 184)
+        self.cell(0, 10, "Relatorio gerado automaticamente por algoritmo deterministico HS-Code Automator.", align="C")
 
 
 def gerar_csv_erp(dados: dict) -> str:
@@ -40,7 +63,7 @@ def gerar_xml_cargowise(dados: dict) -> str:
     header = ET.SubElement(root, "Header")
     ET.SubElement(header, "InvoiceNumber").text = str(dados.get("fatura_num", "N/A"))
     ET.SubElement(header, "Supplier").text = str(dados.get("fornecedor", "N/A"))
-    ET.SubElement(header, "TransportMode").text = str(dados.get("modal_transporte", "AÉREO"))
+    ET.SubElement(header, "TransportMode").text = str(dados.get("modal_transporte", "AERO"))
     ET.SubElement(header, "AuditStatus").text = str(dados.get("status_aprovacao", "N/A"))
     
     items_node = ET.SubElement(root, "LineItems")
@@ -63,205 +86,116 @@ def gerar_xml_cargowise(dados: dict) -> str:
 
 
 def gerar_pdf_relatorio_compliance(dados: dict, user_email: str) -> bytes:
-    """Gera o PDF do Certificado de Auditoria de Compliance usando HTML + WeasyPrint."""
-    fatura = dados.get("fatura_num", "N/A")
-    fornecedor = dados.get("fornecedor", "N/A")
-    modal = dados.get("modal_transporte", "AÉREO")
-    status = dados.get("status_aprovacao", "N/A")
-    status_cor = "#2e7d32" if "APROVADO" in status else "#c62828"
+    """Gera o PDF do Certificado de Auditoria via FPDF2 de alta performance."""
+    pdf = PDFComplianceReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
     
-    itens = dados.get("itens_classificados", [])
+    fatura = str(dados.get("fatura_num", "N/A"))
+    fornecedor = str(dados.get("fornecedor", "N/A"))
+    modal = str(dados.get("modal_transporte", "AERO"))
+    status = str(dados.get("status_aprovacao", "N/A"))
     alertas = dados.get("alertas_criticos_codigo", [])
     
-    rows_html = ""
-    for item in itens:
-        rows_html += f"""
-        <tr>
-            <td style="text-align: center;">{item.get('item_num', '-')}</td>
-            <td>{item.get('descricao_original', '-')}</td>
-            <td style="text-align: center; font-weight: bold;">{item.get('hs_code_6dig', '-')}</td>
-            <td style="text-align: center;">{item.get('ncm_code_8dig', '-')}</td>
-            <td style="text-align: center;">{item.get('un_number', 'N/A')}</td>
-            <td style="text-align: center;">{item.get('classe_risco', 'N/A')}</td>
-            <td style="text-align: center;">{item.get('grau_confianca', 0)}%</td>
-        </tr>
-        """
-        
-    alertas_html = ""
-    if alertas:
-        alertas_items = "".join([f"<li style='color: #c62828; font-weight: bold;'>{a}</li>" for a in alertas])
-        alertas_html = f"""
-        <div style="background-color: #ffebee; border-left: 4px solid #c62828; padding: 12px; margin-top: 15px; border-radius: 4px;">
-            <h3 style="margin-top: 0; color: #c62828; font-size: 13pt;">⚠️ Bloqueios e Alertas Críticos de Regulação:</h3>
-            <ul style="margin-bottom: 0; padding-left: 20px;">
-                {alertas_items}
-            </ul>
-        </div>
-        """
-    else:
-        alertas_html = """
-        <div style="background-color: #e8f5e9; border-left: 4px solid #2e7d32; padding: 12px; margin-top: 15px; border-radius: 4px;">
-            <p style="margin: 0; color: #2e7d32; font-weight: bold;">🟢 Nenhuma incompatibilidade regulatória ou infração detetada.</p>
-        </div>
-        """
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            @page {{
-                size: A4;
-                margin: 15mm 12mm;
-                background-color: #ffffff;
-            }}
-            * {{ box-sizing: border-box; }}
-            body {{
-                font-family: Arial, sans-serif;
-                font-size: 10pt;
-                color: #2c3e50;
-                margin: 0;
-                padding: 0;
-            }}
-            .header {{
-                background-color: #1a252f;
-                color: white;
-                padding: 20px;
-                margin: -15mm -12mm 20px -12mm;
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 18pt;
-                letter-spacing: 0.5px;
-            }}
-            .header p {{
-                margin: 5px 0 0 0;
-                font-size: 9pt;
-                color: #bdc3c7;
-            }}
-            .info-grid {{
-                width: 100%;
-                margin-bottom: 20px;
-                border-collapse: collapse;
-            }}
-            .info-grid td {{
-                padding: 8px;
-                border: 1px solid #e2e8f0;
-                background-color: #f8fafc;
-            }}
-            .info-label {{
-                font-weight: bold;
-                color: #64748b;
-                font-size: 8.5pt;
-                text-transform: uppercase;
-            }}
-            .info-val {{
-                font-size: 10pt;
-                color: #0f172a;
-                font-weight: bold;
-            }}
-            .status-badge {{
-                display: inline-block;
-                padding: 6px 12px;
-                color: white;
-                background-color: {status_cor};
-                font-weight: bold;
-                border-radius: 4px;
-                font-size: 11pt;
-            }}
-            table.data-table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 15px;
-            }}
-            table.data-table th {{
-                background-color: #334155;
-                color: white;
-                padding: 8px;
-                font-size: 9pt;
-                text-align: left;
-            }}
-            table.data-table td {{
-                padding: 8px;
-                border-bottom: 1px solid #e2e8f0;
-                font-size: 9pt;
-            }}
-            table.data-table tr:nth-child(even) {{
-                background-color: #f8fafc;
-            }}
-            .footer {{
-                margin-top: 30px;
-                border-top: 1px solid #cbd5e1;
-                padding-top: 10px;
-                font-size: 8pt;
-                color: #94a3b8;
-                text-align: center;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>CERTIFICADO DE AUDITORIA DE COMPLIANCE</h1>
-            <p>HS-Code Automator | Middleware Aduaneiro & Multimodal Enterprise</p>
-        </div>
-
-        <table class="info-grid">
-            <tr>
-                <td width="33%">
-                    <div class="info-label">Nº de Fatura</div>
-                    <div class="info-val">{fatura}</div>
-                </td>
-                <td width="33%">
-                    <div class="info-label">Fornecedor</div>
-                    <div class="info-val">{fornecedor}</div>
-                </td>
-                <td width="33%">
-                    <div class="info-label">Modal de Transporte</div>
-                    <div class="info-val">{modal}</div>
-                </td>
-            </tr>
-            <tr>
-                <td>
-                    <div class="info-label">Auditado Por</div>
-                    <div class="info-val">{user_email}</div>
-                </td>
-                <td colspan="2">
-                    <div class="info-label">Resultado da Validação Estrita</div>
-                    <div style="margin-top: 4px;"><span class="status-badge">{status}</span></div>
-                </td>
-            </tr>
-        </table>
-
-        {alertas_html}
-
-        <h3 style="margin-top: 25px; color: #1e293b; border-bottom: 2px solid #cbd5e1; padding-bottom: 5px;">
-            Itens Classificados & Regulação Perigosa
-        </h3>
-
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th style="width: 6%;">#</th>
-                    <th>Descrição do Produto</th>
-                    <th style="width: 14%; text-align: center;">HS Code</th>
-                    <th style="width: 14%; text-align: center;">NCM/Taric</th>
-                    <th style="width: 12%; text-align: center;">UN Number</th>
-                    <th style="width: 12%; text-align: center;">Classe</th>
-                    <th style="width: 10%; text-align: center;">Conf.</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows_html}
-            </tbody>
-        </table>
-
-        <div class="footer">
-            Relatório gerado automaticamente por algoritmo determinístico HS-Code Automator.<br>
-            A conformidade foi checada com base nos regulamentos vigentes IATA DGR, IMDG Code e ADR.
-        </div>
-    </body>
-    </html>
-    """
+    # Cartão de Informações
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(226, 232, 240)
+    pdf.rect(10, 35, 190, 28, 'DF')
     
-    return HTML(string=html_content).write_pdf()
+    pdf.set_xy(12, 37)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(60, 4, "FATURA", ln=False)
+    pdf.cell(65, 4, "FORNECEDOR", ln=False)
+    pdf.cell(60, 4, "MODAL", ln=True)
+    
+    pdf.set_xy(12, 42)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(60, 6, fatura, ln=False)
+    pdf.cell(65, 6, fornecedor[:30], ln=False)
+    pdf.cell(60, 6, modal, ln=True)
+    
+    pdf.set_xy(12, 50)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(60, 4, "UTILIZADOR", ln=False)
+    pdf.cell(125, 4, "RESULTADO DA AUDITORIA", ln=True)
+    
+    pdf.set_xy(12, 55)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(60, 5, user_email, ln=False)
+    
+    if "APROVADO" in status:
+        pdf.set_text_color(46, 125, 50)
+    else:
+        pdf.set_text_color(198, 40, 40)
+    pdf.cell(125, 5, status, ln=True)
+    
+    # Caixa de Alertas
+    pdf.ln(10)
+    if alertas:
+        pdf.set_fill_color(254, 242, 242)
+        pdf.set_draw_color(239, 68, 68)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(185, 28, 28)
+        
+        pdf.cell(190, 7, "  ALERTAS CRITICOS DE COMPLIANCE DETETADOS:", ln=True, fill=True)
+        pdf.set_font("Helvetica", "", 8.5)
+        for al in alertas:
+            # Substitui carateres não-latin1 para evitar erro no PDF simples
+            al_clean = al.encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(190, 5, f"   - {al_clean}", border=0)
+    else:
+        pdf.set_fill_color(240, 253, 244)
+        pdf.set_draw_color(34, 197, 94)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(21, 128, 61)
+        pdf.cell(190, 7, "  Nenhuma incompatibilidade regulatoria ou infracao detetada.", ln=True, fill=True)
+        
+    # Tabela de Produtos
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(30, 41, 59)
+    pdf.cell(0, 6, "Itens Classificados & Regulacao Perigosa", ln=True)
+    pdf.ln(2)
+    
+    # Cabeçalho da Tabela
+    pdf.set_fill_color(51, 65, 85)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 8)
+    
+    pdf.cell(10, 6, "#", border=1, align="C", fill=True)
+    pdf.cell(75, 6, "Descricao do Produto", border=1, align="L", fill=True)
+    pdf.cell(25, 6, "HS Code", border=1, align="C", fill=True)
+    pdf.cell(25, 6, "NCM/Taric", border=1, align="C", fill=True)
+    pdf.cell(25, 6, "UN Number", border=1, align="C", fill=True)
+    pdf.cell(30, 6, "Classe", border=1, align="C", fill=True)
+    pdf.ln()
+    
+    # Linhas da Tabela
+    pdf.set_text_color(30, 41, 59)
+    pdf.set_font("Helvetica", "", 8)
+    fill = False
+    
+    for item in dados.get("itens_classificados", []):
+        pdf.set_fill_color(248, 250, 252) if fill else pdf.set_fill_color(255, 255, 255)
+        
+        num = str(item.get('item_num', '-'))
+        desc = str(item.get('descricao_original', '-'))[:40].encode('latin-1', 'replace').decode('latin-1')
+        hs = str(item.get('hs_code_6dig', '-'))
+        ncm = str(item.get('ncm_code_8dig', '-'))
+        un = str(item.get('un_number', 'N/A'))
+        classe = str(item.get('classe_risco', 'N/A'))
+        
+        pdf.cell(10, 6, num, border=1, align="C", fill=fill)
+        pdf.cell(75, 6, desc, border=1, align="L", fill=fill)
+        pdf.cell(25, 6, hs, border=1, align="C", fill=fill)
+        pdf.cell(25, 6, ncm, border=1, align="C", fill=fill)
+        pdf.cell(25, 6, un, border=1, align="C", fill=fill)
+        pdf.cell(30, 6, classe, border=1, align="C", fill=fill)
+        pdf.ln()
+        fill = not fill
+
+    return bytes(pdf.output())
