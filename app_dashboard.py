@@ -1,5 +1,6 @@
 import os
 import json
+import tempfile
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
@@ -12,6 +13,9 @@ from exportador_documentos import gerar_csv_erp, gerar_xml_cargowise, gerar_pdf_
 # Configuração do Supabase via Secrets
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+
+# LIMITE DE SEGURANÇA: 10 MB em bytes
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 
 @st.cache_resource
 def iniciar_supabase() -> Client:
@@ -44,31 +48,37 @@ def tela_login():
         
         with aba_login:
             with st.form("form_login"):
-                email = st.text_input("Email Corporativo")
+                email = st.text_input("Email Corporativo").strip().lower()
                 password = st.text_input("Palavra-passe", type="password")
                 btn_entrar = st.form_submit_button("Entrar no Sistema", type="primary", use_container_width=True)
                 
                 if btn_entrar:
-                    try:
-                        resposta = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                        st.session_state.user = resposta.user
-                        st.success("Autenticado com sucesso!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error("Falha na autenticação: Credenciais inválidas ou limite de tentativas excedido.")
+                    if not email or not password:
+                        st.warning("Por favor, preencha o email e a palavra-passe.")
+                    else:
+                        try:
+                            resposta = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                            st.session_state.user = resposta.user
+                            st.success("Autenticado com sucesso!")
+                            st.rerun()
+                        except Exception:
+                            st.error("Falha na autenticação: Credenciais inválidas ou limite de tentativas excedido.")
 
         with aba_registo:
             with st.form("form_registo"):
-                novo_email = st.text_input("Email Corporativo")
+                novo_email = st.text_input("Email Corporativo").strip().lower()
                 nova_password = st.text_input("Palavra-passe (mínimo 6 caracteres)", type="password")
                 btn_registrar = st.form_submit_button("Criar Conta Enterprise", use_container_width=True)
                 
                 if btn_registrar:
-                    try:
-                        resposta = supabase.auth.sign_up({"email": novo_email, "password": nova_password})
-                        st.success("Conta criada com sucesso! Já pode efetuar login.")
-                    except Exception as e:
-                        st.error(f"Erro ao criar conta: {e}")
+                    if len(nova_password) < 6:
+                        st.warning("A palavra-passe deve ter pelo menos 6 caracteres.")
+                    else:
+                        try:
+                            resposta = supabase.auth.sign_up({"email": novo_email, "password": nova_password})
+                            st.success("Conta criada com sucesso! Já pode efetuar login.")
+                        except Exception:
+                            st.error("Erro ao criar conta. Verifique se o email é válido.")
 
 # Bloqueia a execução se não estiver logado
 if not st.session_state.user:
@@ -116,19 +126,38 @@ tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ H
 # =====================================================================
 with tab_processar:
     st.subheader("1. Ingestão de Documentos")
-    uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF)", type=["pdf"])
+    uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF - Máx 10MB)", type=["pdf"])
 
     if uploaded_file is not None:
-        temp_path = "temp_fatura.pdf"
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        # 🛡️ SEGURANÇA 1: Validação de Tamanho do Ficheiro (DoS Protection)
+        if uploaded_file.size > MAX_FILE_SIZE_BYTES:
+            st.error("🚨 Ficheiro demasiado grande! O limite máximo permitido é de 10 MB.")
+            st.stop()
 
-        with st.spinner(f"📄 Analisando fatura e auditando regras de compliance ({modal_transporte})..."):
-            texto = extrair_texto_fatura(temp_path)
-            dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
-            
-            # 🛡️ AUDITORIA DETERMINÍSTICA DE CÓDIGO PURO
-            dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
+        temp_file_path = None
+        try:
+            # 🛡️ SEGURANÇA 2: Criação de ficheiro temporário isolado e limpo com segurança
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.getbuffer())
+                temp_file_path = tmp.name
+
+            with st.spinner(f"📄 Analisando fatura e auditando regras de compliance ({modal_transporte})..."):
+                texto = extrair_texto_fatura(temp_file_path)
+                dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
+                
+                # AUDITORIA DETERMINÍSTICA
+                dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
+
+        except Exception as e:
+            st.error("Erro ao processar o documento. Verifique se o PDF contém texto legível.")
+            st.stop()
+        finally:
+            # 🛡️ SEGURANÇA 3: Garante que o ficheiro temporário é apagado do servidor IMEDIATAMENTE após a leitura
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except Exception:
+                    pass
 
         st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada e auditada com sucesso!")
 
@@ -159,8 +188,8 @@ with tab_processar:
             }
             supabase.table("faturas_processadas").insert(registro).execute()
             st.toast("✅ Fatura guardada com segurança no histórico!")
-        except Exception as e:
-            st.warning(f"Aviso ao gravar registo: {e}")
+        except Exception:
+            st.warning("Aviso ao gravar registo no histórico remoto.")
 
         # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP
         st.divider()
@@ -264,5 +293,5 @@ with tab_historico:
             
             st.dataframe(pd.DataFrame(lista_historico), use_container_width=True)
             
-    except Exception as e:
-        st.error(f"Erro ao carregar histórico: {e}")
+    except Exception:
+        st.error("Erro ao carregar o histórico. Tente novamente mais tarde.")
