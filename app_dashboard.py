@@ -88,10 +88,10 @@ with st.sidebar:
         ["AÉREO (IATA DGR)", "MARÍTIMO (IMDG)", "RODOVIÁRIO (ADR)"]
     )
     
-    sistema_destino = st.selectbox(
-        "Sistema de Destino (ERP)",
-        ["CargoWise", "Primavera ERP", "Exportar CSV/JSON", "API Direct Webhook"]
-    )
+    # =====================================================================
+# SIDEBAR COM DADOS DO UTILIZADOR E CONFIGURAÇÕES DO EMBARQUE
+# =====================================================================
+with st.sidebar:
     st.header("👤 Sessão Ativa")
     st.caption(f"Conectado como:\n**{user_email}**")
     
@@ -101,18 +101,21 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    st.header("⚙️ Configurações")
+    st.header("⚙️ Configurações do Embarque")
+    
+    # 1. SELETOR MULTIMODAL
+    modal_transporte = st.selectbox(
+        "🚢 Modal de Transporte",
+        ["AÉREO (IATA DGR)", "MARÍTIMO (IMDG)", "RODOVIÁRIO (ADR)"],
+        key="sb_modal_transporte"
+    )
+    
+    # 2. SELETOR DE SISTEMA ERP
     sistema_destino = st.selectbox(
         "Sistema de Destino (ERP)",
-        ["CargoWise", "Primavera ERP", "Exportar CSV/JSON", "API Direct Webhook"]
+        ["CargoWise", "Primavera ERP", "Exportar CSV/JSON", "API Direct Webhook"],
+        key="sb_sistema_destino"
     )
-
-st.title("📦 HS-Code Automator — Dashboard Enterprise")
-tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico Protegido"])
-
-# --- TAB 1: PROCESSAR FATURA ---
-with tab_processar:
-    st.subheader("1. Ingestão de Documentos")
     uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF)", type=["pdf"])
 
     if uploaded_file is not None:
