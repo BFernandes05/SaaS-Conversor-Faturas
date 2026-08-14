@@ -1,6 +1,7 @@
 import os
 import json
 import tempfile
+from datetime import datetime, timezone
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
@@ -14,8 +15,11 @@ from exportador_documentos import gerar_csv_erp, gerar_xml_cargowise, gerar_pdf_
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
-# LIMITE DE SEGURANÇA: 10 MB em bytes
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+# =====================================================================
+# CONFIGURAÇÕES DE SEGURANÇA E FINOPS
+# =====================================================================
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # Limite de Tamanho do Ficheiro: 10 MB
+LIMITE_DIARIO_FATURAS = 10              # Quota de Rate Limiting por utilizador/dia
 
 @st.cache_resource
 def iniciar_supabase() -> Client:
@@ -24,6 +28,26 @@ def iniciar_supabase() -> Client:
     return None
 
 supabase = iniciar_supabase()
+
+def verificar_quota_diaria(user_id: str, limite: int = LIMITE_DIARIO_FATURAS) -> tuple[bool, int]:
+    """
+    Verifica se o utilizador atingiu o limite diário de faturas processadas.
+    Retorna (permitido: bool, total_processado_hoje: int).
+    """
+    if not supabase:
+        return True, 0
+    try:
+        hoje_inicio = datetime.now(timezone.utc).strftime("%Y-%m-%d 00:00:00")
+        resposta = supabase.table("faturas_processadas") \
+            .select("id", count="exact") \
+            .eq("user_id", user_id) \
+            .gte("created_at", hoje_inicio) \
+            .execute()
+            
+        total_hoje = resposta.count or 0
+        return total_hoje < limite, total_hoje
+    except Exception:
+        return True, 0
 
 st.set_page_config(
     page_title="HS-Code Automator | SaaS Enterprise",
@@ -91,11 +115,25 @@ if not st.session_state.user:
 user_email = st.session_state.user.email
 user_id = st.session_state.user.id
 
+# CHECAGEM DE QUOTA FINOPS
+dentro_da_quota, usadashoje = verificar_quota_diaria(user_id)
+
 # --- SIDEBAR UNIFICADA ---
 with st.sidebar:
     st.header("👤 Sessão Ativa")
     st.caption(f"Conectado como:\n**{user_email}**")
     
+    # Exibição do consumo de quota
+    st.divider()
+    st.markdown("### 📊 Quota Diária (FinOps)")
+    progresso_pct = min(1.0, usadashoje / LIMITE_DIARIO_FATURAS)
+    st.progress(progresso_pct)
+    st.caption(f"Processadas hoje: **{usadashoje} / {LIMITE_DIARIO_FATURAS} faturas**")
+    
+    if not dentro_da_quota:
+        st.error("🚨 Limite diário atingido. Contacte o suporte para subscrição ilimitada.")
+    
+    st.divider()
     if st.button("🚪 Terminar Sessão (Logout)", use_container_width=True):
         supabase.auth.sign_out()
         st.session_state.user = None
@@ -126,148 +164,152 @@ tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ H
 # =====================================================================
 with tab_processar:
     st.subheader("1. Ingestão de Documentos")
-    uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF - Máx 10MB)", type=["pdf"])
+    
+    if not dentro_da_quota:
+        st.error(f"🛑 **Atingiu a sua quota diária de {LIMITE_DIARIO_FATURAS} faturas/dia.** Para continuar a processar em volume ilimitado, solicite a atualização para o plano Pro Enterprise.")
+    else:
+        uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF - Máx 10MB)", type=["pdf"])
 
-    if uploaded_file is not None:
-        # 🛡️ SEGURANÇA 1: Validação de Tamanho do Ficheiro (DoS Protection)
-        if uploaded_file.size > MAX_FILE_SIZE_BYTES:
-            st.error("🚨 Ficheiro demasiado grande! O limite máximo permitido é de 10 MB.")
-            st.stop()
+        if uploaded_file is not None:
+            # 🛡️ SEGURANÇA 1: Validação de Tamanho do Ficheiro (DoS Protection)
+            if uploaded_file.size > MAX_FILE_SIZE_BYTES:
+                st.error("🚨 Ficheiro demasiado grande! O limite máximo permitido é de 10 MB.")
+                st.stop()
 
-        temp_file_path = None
-        try:
-            # 🛡️ SEGURANÇA 2: Criação de ficheiro temporário isolado e limpo com segurança
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.getbuffer())
-                temp_file_path = tmp.name
+            temp_file_path = None
+            try:
+                # 🛡️ SEGURANÇA 2: Criação de ficheiro temporário isolado e limpo com segurança
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_file.getbuffer())
+                    temp_file_path = tmp.name
 
-            with st.spinner(f"📄 Analisando fatura e auditando regras de compliance ({modal_transporte})..."):
-                texto = extrair_texto_fatura(temp_file_path)
-                dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
+                with st.spinner(f"📄 Analisando fatura e auditando regras de compliance ({modal_transporte})..."):
+                    texto = extrair_texto_fatura(temp_file_path)
+                    dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
+                    
+                    # AUDITORIA DETERMINÍSTICA
+                    dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
+
+            except Exception:
+                st.error("Erro ao processar o documento. Verifique se o PDF contém texto legível.")
+                st.stop()
+            finally:
+                # 🛡️ SEGURANÇA 3: Apaga o ficheiro temporário do servidor imediatamente
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.remove(temp_file_path)
+                    except Exception:
+                        pass
+
+            st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada e auditada com sucesso!")
+
+            # EXIBIÇÃO DO STATUS DA AUDITORIA
+            st.divider()
+            if dados.get("status_aprovacao") == "🟢 APROVADO COMPLIANCE":
+                st.success(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
+            else:
+                st.error(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
+                for alerta in dados.get("alertas_criticos_codigo", []):
+                    st.warning(alerta)
+
+            if dados.get("resumo_adr_pontos"):
+                st.info(f"📊 **Cálculo ADR:** {dados.get('resumo_adr_pontos')}")
+
+            if dados.get("resumo_compliance_modal"):
+                st.info(f"💡 **Resumo de Compliance ({modal_transporte}):** {dados.get('resumo_compliance_modal')}")
+
+            # GUARDAR NO SUPABASE
+            try:
+                registro = {
+                    "user_id": user_id,
+                    "empresa_id": user_email,
+                    "fatura_num": dados.get("fatura_num"),
+                    "fornecedor": dados.get("fornecedor"),
+                    "modal_transporte": modal_transporte,
+                    "dados_json": dados
+                }
+                supabase.table("faturas_processadas").insert(registro).execute()
+                st.toast("✅ Fatura guardada com segurança no histórico!")
+            except Exception:
+                st.warning("Aviso ao gravar registo no histórico remoto.")
+
+            # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP
+            st.divider()
+            st.subheader("2. Validação Human-in-the-Loop")
+
+            itens = dados.get("itens_classificados", [])
+            tabela_dados = []
+            for item in itens:
+                confianca = item.get("grau_confianca", 0)
+                status_icon = "🟢" if confianca >= 90 else "🟡"
                 
-                # AUDITORIA DETERMINÍSTICA
-                dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
+                tabela_dados.append({
+                    "Status": f"{status_icon} {confianca}%",
+                    "Item #": item.get("item_num"),
+                    "Descrição do Produto": item.get("descricao_original"),
+                    "HS Code": item.get("hs_code_6dig"),
+                    "NCM / Taric": item.get("ncm_code_8dig"),
+                    "UN Number": item.get("un_number", "N/A"),
+                    "Classe Risco": item.get("classe_risco", "N/A"),
+                    "Alerta Modal": item.get("alerta_duvida") or "Sem risco"
+                })
 
-        except Exception as e:
-            st.error("Erro ao processar o documento. Verifique se o PDF contém texto legível.")
-            st.stop()
-        finally:
-            # 🛡️ SEGURANÇA 3: Garante que o ficheiro temporário é apagado do servidor IMEDIATAMENTE após a leitura
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except Exception:
-                    pass
+            df = pd.DataFrame(tabela_dados)
+            st.dataframe(df, use_container_width=True)
 
-        st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada e auditada com sucesso!")
+            bloqueado = dados.get("status_aprovacao") != "🟢 APROVADO COMPLIANCE"
 
-        # EXIBIÇÃO DO STATUS DA AUDITORIA
-        st.divider()
-        if dados.get("status_aprovacao") == "🟢 APROVADO COMPLIANCE":
-            st.success(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
-        else:
-            st.error(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
-            for alerta in dados.get("alertas_criticos_codigo", []):
-                st.warning(alerta)
+            st.divider()
+            st.subheader("3. Exportação & Integração de Dados")
 
-        if dados.get("resumo_adr_pontos"):
-            st.info(f"📊 **Cálculo ADR:** {dados.get('resumo_adr_pontos')}")
+            # GERAR DOCUMENTOS PARA DOWNLOAD
+            pdf_bytes = gerar_pdf_relatorio_compliance(dados, user_email)
+            xml_data = gerar_xml_cargowise(dados)
+            csv_data = gerar_csv_erp(dados)
+            json_str = json.dumps(dados, indent=2, ensure_ascii=False)
 
-        if dados.get("resumo_compliance_modal"):
-            st.info(f"💡 **Resumo de Compliance ({modal_transporte}):** {dados.get('resumo_compliance_modal')}")
+            col1, col2, col3, col4 = st.columns(4)
 
-        # GUARDAR NO SUPABASE
-        try:
-            registro = {
-                "user_id": user_id,
-                "empresa_id": user_email,
-                "fatura_num": dados.get("fatura_num"),
-                "fornecedor": dados.get("fornecedor"),
-                "modal_transporte": modal_transporte,
-                "dados_json": dados
-            }
-            supabase.table("faturas_processadas").insert(registro).execute()
-            st.toast("✅ Fatura guardada com segurança no histórico!")
-        except Exception:
-            st.warning("Aviso ao gravar registo no histórico remoto.")
+            with col1:
+                st.download_button(
+                    label="📄 Relatório PDF de Compliance",
+                    data=pdf_bytes,
+                    file_name=f"Relatorio_Compliance_{dados.get('fatura_num', 'export')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
 
-        # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP
-        st.divider()
-        st.subheader("2. Validação Human-in-the-Loop")
+            with col2:
+                st.download_button(
+                    label="🏢 Exportar XML (CargoWise)",
+                    data=xml_data,
+                    file_name=f"cargowise_{dados.get('fatura_num', 'export')}.xml",
+                    mime="application/xml",
+                    use_container_width=True,
+                    disabled=bloqueado
+                )
 
-        itens = dados.get("itens_classificados", [])
-        tabela_dados = []
-        for item in itens:
-            confianca = item.get("grau_confianca", 0)
-            status_icon = "🟢" if confianca >= 90 else "🟡"
-            
-            tabela_dados.append({
-                "Status": f"{status_icon} {confianca}%",
-                "Item #": item.get("item_num"),
-                "Descrição do Produto": item.get("descricao_original"),
-                "HS Code": item.get("hs_code_6dig"),
-                "NCM / Taric": item.get("ncm_code_8dig"),
-                "UN Number": item.get("un_number", "N/A"),
-                "Classe Risco": item.get("classe_risco", "N/A"),
-                "Alerta Modal": item.get("alerta_duvida") or "Sem risco"
-            })
+            with col3:
+                st.download_button(
+                    label="📊 Exportar CSV (Primavera/ERP)",
+                    data=csv_data,
+                    file_name=f"erp_import_{dados.get('fatura_num', 'export')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    disabled=bloqueado
+                )
 
-        df = pd.DataFrame(tabela_dados)
-        st.dataframe(df, use_container_width=True)
+            with col4:
+                st.download_button(
+                    label="📥 JSON Limpo (API)",
+                    data=json_str,
+                    file_name=f"classificacao_{dados.get('fatura_num', 'export')}.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
 
-        bloqueado = dados.get("status_aprovacao") != "🟢 APROVADO COMPLIANCE"
-
-        st.divider()
-        st.subheader("3. Exportação & Integração de Dados")
-
-        # GERAR DOCUMENTOS PARA DOWNLOAD
-        pdf_bytes = gerar_pdf_relatorio_compliance(dados, user_email)
-        xml_data = gerar_xml_cargowise(dados)
-        csv_data = gerar_csv_erp(dados)
-        json_str = json.dumps(dados, indent=2, ensure_ascii=False)
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.download_button(
-                label="📄 Relatório PDF de Compliance",
-                data=pdf_bytes,
-                file_name=f"Relatorio_Compliance_{dados.get('fatura_num', 'export')}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-
-        with col2:
-            st.download_button(
-                label="🏢 Exportar XML (CargoWise)",
-                data=xml_data,
-                file_name=f"cargowise_{dados.get('fatura_num', 'export')}.xml",
-                mime="application/xml",
-                use_container_width=True,
-                disabled=bloqueado
-            )
-
-        with col3:
-            st.download_button(
-                label="📊 Exportar CSV (Primavera/ERP)",
-                data=csv_data,
-                file_name=f"erp_import_{dados.get('fatura_num', 'export')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                disabled=bloqueado
-            )
-
-        with col4:
-            st.download_button(
-                label="📥 JSON Limpo (API)",
-                data=json_str,
-                file_name=f"classificacao_{dados.get('fatura_num', 'export')}.json",
-                mime="application/json",
-                use_container_width=True
-            )
-
-        if bloqueado:
-            st.warning("⚠️ Os ficheiros de integração com ERP (XML e CSV) estão bloqueados até que os alertas de compliance sejam resolvidos.")
+            if bloqueado:
+                st.warning("⚠️ Os ficheiros de integração com ERP (XML e CSV) estão bloqueados até que os alertas de compliance sejam resolvidos.")
 
 # =====================================================================
 # TAB 2: HISTÓRICO PROTEGIDO
