@@ -2,7 +2,20 @@ import os
 import json
 import streamlit as st
 import pandas as pd
+from supabase import create_client, Client
 from motor_classificador import extrair_texto_fatura, classificar_itens_com_ia
+
+# Configuração do Supabase
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+
+@st.cache_resource
+def iniciar_supabase() -> Client:
+    if SUPABASE_URL and SUPABASE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return None
+
+supabase = iniciar_supabase()
 
 # Configuração da página Web
 st.set_page_config(
@@ -14,7 +27,7 @@ st.set_page_config(
 st.title("📦 HS-Code Automator — Middleware para Despachantes")
 st.caption("Classificação Automática de NCM/HS Codes com Análise de Risco Aduaneiro")
 
-# Sidebar para definições
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Configurações do Middleware")
     empresa_id = st.text_input("Empresa / Licença ID", value="DESPACHANTE_DEMO_01")
@@ -25,79 +38,106 @@ with st.sidebar:
     st.divider()
     st.info("💡 **Dica Comercial:** Itens com confiança < 90% requerem validação manual antes da injeção no ERP.")
 
-# Área de Upload de Documentos
-st.subheader("1. Ingestão de Documentos")
-uploaded_file = st.file_uploader("Arraste e largue a Comercial Invoice (PDF)", type=["pdf"])
+# Separadores principais
+tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico na Base de Dados"])
 
-# Se o utilizador carregar um PDF (ou usar a nossa fatura de teste se não fizer upload)
-if uploaded_file is not None or st.button("🚀 Testar com a Fatura de Exemplo (Desktop)"):
-    
-    # Processar ficheiro enviado ou usar o do Desktop
+# =====================================================================
+# TAB 1: PROCESSAR FATURA
+# =====================================================================
+with tab_processar:
+    st.subheader("1. Ingestão de Documentos")
+    uploaded_file = st.file_uploader("Arraste e largue a Comercial Invoice (PDF)", type=["pdf"])
+
     if uploaded_file is not None:
         temp_path = "temp_fatura.pdf"
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
-        caminho_pdf = temp_path
-    else:
-        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
-        if not os.path.exists(desktop):
-            desktop = os.path.join(os.path.expanduser('~'), 'Área de Trabalho')
-        caminho_pdf = os.path.join(desktop, "fatura_importacao_exemplo.pdf")
 
-    with st.spinner("📄 Lendo PDF e analisando enquadramento fiscal com IA..."):
-        texto = extrair_texto_fatura(caminho_pdf)
-        dados = classificar_itens_com_ia(texto)
+        with st.spinner("📄 Lendo PDF e analisando enquadramento fiscal com a IA..."):
+            texto = extrair_texto_fatura(temp_path)
+            dados = classificar_itens_com_ia(texto)
 
-    st.success(f"Fatura **{dados.get('fatura_num')}** do fornecedor **{dados.get('fornecedor')}** processada com sucesso!")
+        st.success(f"Fatura **{dados.get('fatura_num')}** do fornecedor **{dados.get('fornecedor')}** processada com sucesso!")
 
-    st.divider()
-    st.subheader("2. Validação Human-in-the-Loop (Revisão de Classificação)")
+        # GUARDAR NO SUPABASE
+        if supabase:
+            try:
+                registro = {
+                    "empresa_id": empresa_id,
+                    "fatura_num": dados.get("fatura_num"),
+                    "fornecedor": dados.get("fornecedor"),
+                    "dados_json": dados
+                }
+                supabase.table("faturas_processadas").insert(registro).execute()
+                st.toast("✅ Fatura guardada com sucesso na base de dados Supabase!")
+            except Exception as e:
+                st.warning(f"Não foi possível gravar no Supabase: {e}")
 
-    itens = dados.get("itens_classificados", [])
-    
-    # Criar tabela editável para o utilizador
-    tabela_dados = []
-    for item in itens:
-        confianca = item.get("grau_confianca", 0)
-        status_icon = "🟢" if confianca >= 90 else "🟡"
+        st.divider()
+        st.subheader("2. Validação Human-in-the-Loop (Revisão de Classificação)")
+
+        itens = dados.get("itens_classificados", [])
+        tabela_dados = []
+        for item in itens:
+            confianca = item.get("grau_confianca", 0)
+            status_icon = "🟢" if confianca >= 90 else "🟡"
+            
+            tabela_dados.append({
+                "Status": f"{status_icon} {confianca}%",
+                "Item #": item.get("item_num"),
+                "Descrição do Produto": item.get("descricao_original"),
+                "HS Code (6 Dig)": item.get("hs_code_6dig"),
+                "NCM / Taric (8 Dig)": item.get("ncm_code_8dig"),
+                "Fundamentação Legal": item.get("justificativa_legal"),
+                "Alerta de Risco": item.get("alerta_duvida") or "Nenhum risco"
+            })
+
+        df = pd.DataFrame(tabela_dados)
+        st.dataframe(df, use_container_width=True)
+
+        st.divider()
+        st.subheader("3. Injeção & Exportação de Dados")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Confirmar e Injetar no " + sistema_destino, type="primary"):
+                st.balloons()
+                st.success(f"Dados injetados com sucesso via API no sistema {sistema_destino}!")
         
-        tabela_dados.append({
-            "Status": f"{status_icon} {confianca}%",
-            "Item #": item.get("item_num"),
-            "Descrição do Produto": item.get("descricao_original"),
-            "HS Code (6 Dig)": item.get("hs_code_6dig"),
-            "NCM / Taric (8 Dig)": item.get("ncm_code_8dig"),
-            "Fundamentação Legal": item.get("justificativa_legal"),
-            "Alerta de Risco / Dúvida": item.get("alerta_duvida") or "Nenhum risco detetado"
-        })
+        with col2:
+            json_str = json.dumps(dados, indent=2, ensure_ascii=False)
+            st.download_button(
+                label="📥 Descarregar JSON Limpo",
+                data=json_str,
+                file_name=f"classificacao_{dados.get('fatura_num')}.json",
+                mime="application/json"
+            )
 
-    df = pd.DataFrame(tabela_dados)
+# =====================================================================
+# TAB 2: HISTÓRICO DE FATURAS (CONSULTA DA BASE DE DADOS)
+# =====================================================================
+with tab_historico:
+    st.subheader("🗄️ Faturas Guardadas no Supabase")
     
-    # Exibir tabela interativa
-    st.dataframe(
-        df,
-        use_container_width=True,
-        column_config={
-            "Status": st.column_config.TextColumn("Confiança"),
-            "HS Code (6 Dig)": st.column_config.TextColumn("HS Code (Editável)"),
-            "NCM / Taric (8 Dig)": st.column_config.TextColumn("NCM (Editável)"),
-        }
-    )
+    if not supabase:
+        st.error("Conexão ao Supabase não configurada nos Secrets.")
+    else:
+        try:
+            resposta = supabase.table("faturas_processadas").select("*").eq("empresa_id", empresa_id).order("created_at", desc=True).execute()
+            faturas_db = resposta.data
 
-    st.divider()
-    st.subheader("3. Injeção & Exportação de Dados")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("✅ Confirmar e Injetar no " + sistema_destino, type="primary"):
-            st.balloons()
-            st.success(f"Dados injetados com sucesso via API no sistema {sistema_destino}!")
-    
-    with col2:
-        json_str = json.dumps(dados, indent=2, ensure_ascii=False)
-        st.download_button(
-            label="📥 Descarregar JSON Limpo",
-            data=json_str,
-            file_name=f"classificacao_{dados.get('fatura_num')}.json",
-            mime="application/json"
-        )
+            if not faturas_db:
+                st.info("Nenhuma fatura encontrada na base de dados para esta empresa.")
+            else:
+                lista_historico = []
+                for f in faturas_db:
+                    lista_historico.append({
+                        "Data Processamento": f.get("created_at")[:19].replace("T", " "),
+                        "Nº Fatura": f.get("fatura_num"),
+                        "Fornecedor": f.get("fornecedor"),
+                        "Qtd Itens": len(f.get("dados_json", {}).get("itens_classificados", []))
+                    })
+                
+                st.dataframe(pd.DataFrame(lista_historico), use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"Erro ao procurar histórico: {e}")
