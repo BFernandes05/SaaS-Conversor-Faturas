@@ -15,9 +15,7 @@ from exportador_documentos import gerar_csv_erp, gerar_xml_cargowise, gerar_pdf_
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
-# =====================================================================
-# CONFIGURAÇÕES DE SEGURANÇA E FINOPS
-# =====================================================================
+# CONFIGURAÇÕES DE SEGURANÇA, FINOPS E LEGAL
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # Limite de Tamanho do Ficheiro: 10 MB
 LIMITE_DIARIO_FATURAS = 10              # Quota de Rate Limiting por utilizador/dia
 
@@ -30,10 +28,7 @@ def iniciar_supabase() -> Client:
 supabase = iniciar_supabase()
 
 def verificar_quota_diaria(user_id: str, limite: int = LIMITE_DIARIO_FATURAS) -> tuple[bool, int]:
-    """
-    Verifica se o utilizador atingiu o limite diário de faturas processadas.
-    Retorna (permitido: bool, total_processado_hoje: int).
-    """
+    """Verifica se o utilizador atingiu o limite diário de faturas processadas."""
     if not supabase:
         return True, 0
     try:
@@ -55,12 +50,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# Inicializar Estado de Sessão de Autenticação
+# Inicializar Estado de Sessão
 if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================================
-# TELA DE AUTENTICAÇÃO (LOGIN / REGISTO)
+# TELA DE AUTENTICAÇÃO & ACEITAÇÃO DE TERMOS (LOGIN / REGISTO)
 # =====================================================================
 def tela_login():
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -92,10 +87,16 @@ def tela_login():
             with st.form("form_registo"):
                 novo_email = st.text_input("Email Corporativo").strip().lower()
                 nova_password = st.text_input("Palavra-passe (mínimo 6 caracteres)", type="password")
+                
+                # ⚖️ PILAR 4: Consentimento RGPD e Termos de Serviço
+                aceita_termos = st.checkbox("Li e aceito os Termos de Serviço, Política de Privacidade e Isenção de Responsabilidade Aduaneira/DGR.")
+                
                 btn_registrar = st.form_submit_button("Criar Conta Enterprise", use_container_width=True)
                 
                 if btn_registrar:
-                    if len(nova_password) < 6:
+                    if not aceita_termos:
+                        st.warning("⚠️ Deve aceitar os Termos de Serviço para criar conta.")
+                    elif len(nova_password) < 6:
                         st.warning("A palavra-passe deve ter pelo menos 6 caracteres.")
                     else:
                         try:
@@ -138,7 +139,19 @@ with st.sidebar:
         supabase.auth.sign_out()
         st.session_state.user = None
         st.rerun()
-        
+
+    # ⚖️ PILAR 4: Gestão do RGPD / Direito ao Esquecimento
+    st.divider()
+    with st.expander("🛡️ Privacidade & Dados (RGPD)"):
+        st.caption("Conforme o Artigo 17.º do RGPD, pode solicitar a eliminação imediata de todo o seu histórico de faturas do nosso servidor.")
+        if st.button("🗑️ Apagar Todo o Meu Histórico", type="secondary", use_container_width=True):
+            try:
+                supabase.table("faturas_processadas").delete().eq("user_id", user_id).execute()
+                st.success("Histórico eliminado com sucesso!")
+                st.rerun()
+            except Exception:
+                st.error("Erro ao apagar o histórico.")
+
     st.divider()
     st.header("⚙️ Configurações do Embarque")
     
@@ -157,7 +170,7 @@ with st.sidebar:
 st.title("📦 HS-Code Automator — Dashboard Enterprise")
 
 # DEFINIÇÃO DAS TABS
-tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico Protegido"])
+tab_processar, tab_historico, tab_legal = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico Protegido", "⚖️ Termos & Conformidade Legal"])
 
 # =====================================================================
 # TAB 1: PROCESSAR FATURA
@@ -171,14 +184,14 @@ with tab_processar:
         uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF - Máx 10MB)", type=["pdf"])
 
         if uploaded_file is not None:
-            # 🛡️ SEGURANÇA 1: Validação de Tamanho do Ficheiro (DoS Protection)
+            # 🛡️ SEGURANÇA: Validação de Tamanho do Ficheiro (DoS Protection)
             if uploaded_file.size > MAX_FILE_SIZE_BYTES:
                 st.error("🚨 Ficheiro demasiado grande! O limite máximo permitido é de 10 MB.")
                 st.stop()
 
             temp_file_path = None
             try:
-                # 🛡️ SEGURANÇA 2: Criação de ficheiro temporário isolado e limpo com segurança
+                # 🛡️ SEGURANÇA: Ficheiro temporário isolado
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(uploaded_file.getbuffer())
                     temp_file_path = tmp.name
@@ -194,7 +207,7 @@ with tab_processar:
                 st.error("Erro ao processar o documento. Verifique se o PDF contém texto legível.")
                 st.stop()
             finally:
-                # 🛡️ SEGURANÇA 3: Apaga o ficheiro temporário do servidor imediatamente
+                # 🛡️ SEGURANÇA: Apaga o ficheiro temporário imediatamente
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
                         os.remove(temp_file_path)
@@ -337,3 +350,20 @@ with tab_historico:
             
     except Exception:
         st.error("Erro ao carregar o histórico. Tente novamente mais tarde.")
+
+# =====================================================================
+# TAB 3: TERMOS & CONFORMIDADE LEGAL (PILAR 4)
+# =====================================================================
+with tab_legal:
+    st.subheader("⚖️ Declaração de Responsabilidade Legal & RGPD")
+    st.markdown("""
+    ### 1. Isenção de Responsabilidade Aduaneira e DGR
+    * O **HS-Code Automator** é um *middleware* de apoio técnico baseado em inteligência artificial e tabelas determinísticas.
+    * A sugestão de **HS Code / NCM / Taric** e a verificação de regras **IATA DGR, IMDG e ADR** servem como suporte de pré-auditoria e **não substituem a validação final por um Despachante Oficial ou Agente de Carga Certificado**.
+    * A responsabilidade legal pela submissão do documento às Autoridades Aduaneiras e Marítimas/Aéreas é inteiramente do Utilizador/Declarante.
+
+    ### 2. Política de Proteção de Dados (RGPD)
+    * **Confidencialidade:** Os dados das faturas submetidas são processados exclusivamente para fins de auditoria e classificação.
+    * **Retenção:** Os dados permanecem na sua conta até que solicite a sua eliminação através do menu lateral (**Direito ao Esquecimento**).
+    * **Ficheiros Temporários:** Ficheiros PDF carregados são removidos da memória volátil do servidor imediatamente após o processamento.
+    """)
