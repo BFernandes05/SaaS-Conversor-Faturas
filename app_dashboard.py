@@ -66,31 +66,18 @@ def tela_login():
                     except Exception as e:
                         st.error(f"Erro ao criar conta: {e}")
 
-# Se o utilizador não estiver logado, exibe a tela de login e para a execução
+# Bloqueia a execução se não estiver logado
 if not st.session_state.user:
     tela_login()
     st.stop()
 
 # =====================================================================
-# PAINEL PRINCIPAL (APENAS PARA UTILIZADORES AUTENTICADOS)
+# PAINEL PRINCIPAL (DADOS DO UTILIZADOR AUTENTICADO)
 # =====================================================================
-
 user_email = st.session_state.user.email
 user_id = st.session_state.user.id
 
-# Sidebar com perfil do utilizador
-with st.sidebar:
-    st.header("⚙️ Configurações do Embarque")
-    
-    # SELETOR MULTIMODAL
-    modal_transporte = st.selectbox(
-        "🚢 Modal de Transporte",
-        ["AÉREO (IATA DGR)", "MARÍTIMO (IMDG)", "RODOVIÁRIO (ADR)"]
-    )
-    
-    # =====================================================================
-# SIDEBAR COM DADOS DO UTILIZADOR E CONFIGURAÇÕES DO EMBARQUE
-# =====================================================================
+# --- SIDEBAR UNIFICADA ---
 with st.sidebar:
     st.header("👤 Sessão Ativa")
     st.caption(f"Conectado como:\n**{user_email}**")
@@ -103,19 +90,28 @@ with st.sidebar:
     st.divider()
     st.header("⚙️ Configurações do Embarque")
     
-    # 1. SELETOR MULTIMODAL
     modal_transporte = st.selectbox(
         "🚢 Modal de Transporte",
         ["AÉREO (IATA DGR)", "MARÍTIMO (IMDG)", "RODOVIÁRIO (ADR)"],
         key="sb_modal_transporte"
     )
     
-    # 2. SELETOR DE SISTEMA ERP
     sistema_destino = st.selectbox(
         "Sistema de Destino (ERP)",
         ["CargoWise", "Primavera ERP", "Exportar CSV/JSON", "API Direct Webhook"],
         key="sb_sistema_destino"
     )
+
+st.title("📦 HS-Code Automator — Dashboard Enterprise")
+
+# DEFINIÇÃO EXPLICITA DAS TABS (RESOLVE O NAMEERROR)
+tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico Protegido"])
+
+# =====================================================================
+# TAB 1: PROCESSAR FATURA
+# =====================================================================
+with tab_processar:
+    st.subheader("1. Ingestão de Documentos")
     uploaded_file = st.file_uploader("Arraste e largue a Commercial Invoice (PDF)", type=["pdf"])
 
     if uploaded_file is not None:
@@ -123,25 +119,29 @@ with st.sidebar:
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        with st.spinner("📄 Lendo PDF e analisando enquadramento fiscal..."):
+        with st.spinner(f"📄 Analisando fatura para o modal {modal_transporte}..."):
             texto = extrair_texto_fatura(temp_path)
             dados = classificar_itens_com_ia(texto, modal=modal_transporte)
 
-        st.success(f"Fatura **{dados.get('fatura_num')}** processada com sucesso!")
+        st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada com sucesso!")
 
-        # GUARDAR NO SUPABASE COM O USER_ID
+        if dados.get("resumo_compliance_modal"):
+            st.info(f"💡 **Resumo de Compliance ({modal_transporte}):** {dados.get('resumo_compliance_modal')}")
+
+        # GUARDAR NO SUPABASE
         try:
             registro = {
                 "user_id": user_id,
                 "empresa_id": user_email,
                 "fatura_num": dados.get("fatura_num"),
                 "fornecedor": dados.get("fornecedor"),
+                "modal_transporte": modal_transporte,
                 "dados_json": dados
             }
             supabase.table("faturas_processadas").insert(registro).execute()
             st.toast("✅ Fatura guardada com segurança na sua conta!")
         except Exception as e:
-            st.warning(f"Erro ao salvar registro: {e}")
+            st.warning(f"Aviso ao gravar registo: {e}")
 
         st.divider()
         st.subheader("2. Validação Human-in-the-Loop")
@@ -158,8 +158,9 @@ with st.sidebar:
                 "Descrição do Produto": item.get("descricao_original"),
                 "HS Code": item.get("hs_code_6dig"),
                 "NCM / Taric": item.get("ncm_code_8dig"),
-                "Justificativa Legal": item.get("justificativa_legal"),
-                "Alerta de Risco": item.get("alerta_duvida") or "Sem risco"
+                "UN Number": item.get("un_number", "N/A"),
+                "Classe Risco": item.get("classe_risco", "N/A"),
+                "Alerta Modal": item.get("alerta_duvida") or "Sem risco"
             })
 
         df = pd.DataFrame(tabela_dados)
@@ -175,15 +176,16 @@ with st.sidebar:
             st.download_button(
                 label="📥 Descarregar JSON Limpo",
                 data=json_str,
-                file_name=f"classificacao_{dados.get('fatura_num')}.json",
+                file_name=f"classificacao_{dados.get('fatura_num', 'export')}.json",
                 mime="application/json"
             )
 
-# --- TAB 2: HISTÓRICO PROTEGIDO ---
+# =====================================================================
+# TAB 2: HISTÓRICO PROTEGIDO
+# =====================================================================
 with tab_historico:
     st.subheader("🗄️ O seu Histórico de Faturas")
     try:
-        # A consulta só retorna os dados pertencentes ao user_id logado
         resposta = supabase.table("faturas_processadas").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         faturas_db = resposta.data
 
@@ -196,6 +198,7 @@ with tab_historico:
                     "Data": f.get("created_at")[:19].replace("T", " "),
                     "Nº Fatura": f.get("fatura_num"),
                     "Fornecedor": f.get("fornecedor"),
+                    "Modal": f.get("modal_transporte", "AÉREO"),
                     "Qtd Itens": len(f.get("dados_json", {}).get("itens_classificados", []))
                 })
             
