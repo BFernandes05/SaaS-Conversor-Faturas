@@ -3,7 +3,10 @@ import json
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
+
+# Imports das Funções do Nosso Software
 from motor_classificador import extrair_texto_fatura, classificar_itens_com_ia
+from validador_compliance import executar_auditoria_compliance
 
 # Configuração do Supabase via Secrets
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
@@ -104,7 +107,7 @@ with st.sidebar:
 
 st.title("📦 HS-Code Automator — Dashboard Enterprise")
 
-# DEFINIÇÃO EXPLICITA DAS TABS (RESOLVE O NAMEERROR)
+# DEFINIÇÃO DAS TABS
 tab_processar, tab_historico = st.tabs(["📄 Processar Nova Fatura", "🗄️ Histórico Protegido"])
 
 # =====================================================================
@@ -119,11 +122,28 @@ with tab_processar:
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        with st.spinner(f"📄 Analisando fatura para o modal {modal_transporte}..."):
+        with st.spinner(f"📄 Analisando fatura e auditando regras de compliance ({modal_transporte})..."):
             texto = extrair_texto_fatura(temp_path)
-            dados = classificar_itens_com_ia(texto, modal=modal_transporte)
+            dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
+            
+            # 🛡️ AUDITORIA DETERMINÍSTICA DE CÓDIGO PURO (MARGEM DE ERRO ZERO)
+            dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
 
-        st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada com sucesso!")
+        st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada e auditada com sucesso!")
+
+        # -----------------------------------------------------------------
+        # EXIBIÇÃO DO STATUS DA AUDITORIA
+        # -----------------------------------------------------------------
+        st.divider()
+        if dados.get("status_aprovacao") == "🟢 APROVADO COMPLIANCE":
+            st.success(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
+        else:
+            st.error(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
+            for alerta in dados.get("alertas_criticos_codigo", []):
+                st.warning(alerta)
+
+        if dados.get("resumo_adr_pontos"):
+            st.info(f"📊 **Cálculo ADR:** {dados.get('resumo_adr_pontos')}")
 
         if dados.get("resumo_compliance_modal"):
             st.info(f"💡 **Resumo de Compliance ({modal_transporte}):** {dados.get('resumo_compliance_modal')}")
@@ -139,10 +159,13 @@ with tab_processar:
                 "dados_json": dados
             }
             supabase.table("faturas_processadas").insert(registro).execute()
-            st.toast("✅ Fatura guardada com segurança na sua conta!")
+            st.toast("✅ Fatura guardada com segurança no histórico!")
         except Exception as e:
             st.warning(f"Aviso ao gravar registo: {e}")
 
+        # -----------------------------------------------------------------
+        # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP (TABELA DE RESULTADOS)
+        # -----------------------------------------------------------------
         st.divider()
         st.subheader("2. Validação Human-in-the-Loop")
 
@@ -168,9 +191,13 @@ with tab_processar:
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("✅ Confirmar e Injetar no " + sistema_destino, type="primary"):
+            bloqueado = dados.get("status_aprovacao") != "🟢 APROVADO COMPLIANCE"
+            if st.button("✅ Confirmar e Injetar no " + sistema_destino, type="primary", disabled=bloqueado):
                 st.balloons()
                 st.success(f"Dados enviados para o {sistema_destino}!")
+            if bloqueado:
+                st.caption("⚠️ Corrija os alertas críticos de compliance acima para libertar o envio para o ERP.")
+
         with col2:
             json_str = json.dumps(dados, indent=2, ensure_ascii=False)
             st.download_button(
