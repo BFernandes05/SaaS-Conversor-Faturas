@@ -4,9 +4,10 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 
-# Imports das Funções do Nosso Software
+# Imports dos Módulos da Aplicação
 from motor_classificador import extrair_texto_fatura, classificar_itens_com_ia
 from validador_compliance import executar_auditoria_compliance
+from exportador_documentos import gerar_csv_erp, gerar_xml_cargowise, gerar_pdf_relatorio_compliance
 
 # Configuração do Supabase via Secrets
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
@@ -126,14 +127,12 @@ with tab_processar:
             texto = extrair_texto_fatura(temp_path)
             dados_brutos = classificar_itens_com_ia(texto, modal=modal_transporte)
             
-            # 🛡️ AUDITORIA DETERMINÍSTICA DE CÓDIGO PURO (MARGEM DE ERRO ZERO)
+            # 🛡️ AUDITORIA DETERMINÍSTICA DE CÓDIGO PURO
             dados = executar_auditoria_compliance(dados_brutos, modal=modal_transporte)
 
         st.success(f"Fatura **{dados.get('fatura_num', 'N/A')}** processada e auditada com sucesso!")
 
-        # -----------------------------------------------------------------
         # EXIBIÇÃO DO STATUS DA AUDITORIA
-        # -----------------------------------------------------------------
         st.divider()
         if dados.get("status_aprovacao") == "🟢 APROVADO COMPLIANCE":
             st.success(f"### Status da Auditoria: {dados.get('status_aprovacao')}")
@@ -163,9 +162,7 @@ with tab_processar:
         except Exception as e:
             st.warning(f"Aviso ao gravar registo: {e}")
 
-        # -----------------------------------------------------------------
-        # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP (TABELA DE RESULTADOS)
-        # -----------------------------------------------------------------
+        # PASSO 2: VALIDAÇÃO HUMAN-IN-THE-LOOP
         st.divider()
         st.subheader("2. Validação Human-in-the-Loop")
 
@@ -189,23 +186,59 @@ with tab_processar:
         df = pd.DataFrame(tabela_dados)
         st.dataframe(df, use_container_width=True)
 
-        col1, col2 = st.columns(2)
+        bloqueado = dados.get("status_aprovacao") != "🟢 APROVADO COMPLIANCE"
+
+        st.divider()
+        st.subheader("3. Exportação & Integração de Dados")
+
+        # GERAR DOCUMENTOS PARA DOWNLOAD
+        pdf_bytes = gerar_pdf_relatorio_compliance(dados, user_email)
+        xml_data = gerar_xml_cargowise(dados)
+        csv_data = gerar_csv_erp(dados)
+        json_str = json.dumps(dados, indent=2, ensure_ascii=False)
+
+        col1, col2, col3, col4 = st.columns(4)
+
         with col1:
-            bloqueado = dados.get("status_aprovacao") != "🟢 APROVADO COMPLIANCE"
-            if st.button("✅ Confirmar e Injetar no " + sistema_destino, type="primary", disabled=bloqueado):
-                st.balloons()
-                st.success(f"Dados enviados para o {sistema_destino}!")
-            if bloqueado:
-                st.caption("⚠️ Corrija os alertas críticos de compliance acima para libertar o envio para o ERP.")
+            st.download_button(
+                label="📄 Relatório PDF de Compliance",
+                data=pdf_bytes,
+                file_name=f"Relatorio_Compliance_{dados.get('fatura_num', 'export')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
 
         with col2:
-            json_str = json.dumps(dados, indent=2, ensure_ascii=False)
             st.download_button(
-                label="📥 Descarregar JSON Limpo",
+                label="🏢 Exportar XML (CargoWise)",
+                data=xml_data,
+                file_name=f"cargowise_{dados.get('fatura_num', 'export')}.xml",
+                mime="application/xml",
+                use_container_width=True,
+                disabled=bloqueado
+            )
+
+        with col3:
+            st.download_button(
+                label="📊 Exportar CSV (Primavera/ERP)",
+                data=csv_data,
+                file_name=f"erp_import_{dados.get('fatura_num', 'export')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                disabled=bloqueado
+            )
+
+        with col4:
+            st.download_button(
+                label="📥 JSON Limpo (API)",
                 data=json_str,
                 file_name=f"classificacao_{dados.get('fatura_num', 'export')}.json",
-                mime="application/json"
+                mime="application/json",
+                use_container_width=True
             )
+
+        if bloqueado:
+            st.warning("⚠️ Os ficheiros de integração com ERP (XML e CSV) estão bloqueados até que os alertas de compliance sejam resolvidos.")
 
 # =====================================================================
 # TAB 2: HISTÓRICO PROTEGIDO
