@@ -80,6 +80,18 @@ user_id = st.session_state.user.id
 
 # Sidebar com perfil do utilizador
 with st.sidebar:
+    st.header("⚙️ Configurações do Embarque")
+    
+    # SELETOR MULTIMODAL
+    modal_transporte = st.selectbox(
+        "🚢 Modal de Transporte",
+        ["AÉREO (IATA DGR)", "MARÍTIMO (IMDG)", "RODOVIÁRIO (ADR)"]
+    )
+    
+    sistema_destino = st.selectbox(
+        "Sistema de Destino (ERP)",
+        ["CargoWise", "Primavera ERP", "Exportar CSV/JSON", "API Direct Webhook"]
+    )
     st.header("👤 Sessão Ativa")
     st.caption(f"Conectado como:\n**{user_email}**")
     
@@ -110,7 +122,7 @@ with tab_processar:
 
         with st.spinner("📄 Lendo PDF e analisando enquadramento fiscal..."):
             texto = extrair_texto_fatura(temp_path)
-            dados = classificar_itens_com_ia(texto)
+            dados = classificar_itens_com_ia(texto, modal=modal_transporte)
 
         st.success(f"Fatura **{dados.get('fatura_num')}** processada com sucesso!")
 

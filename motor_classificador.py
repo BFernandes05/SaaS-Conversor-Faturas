@@ -4,8 +4,6 @@ import pdfplumber
 from groq import Groq
 from typing import Dict, Any
 
-# Instancia o cliente da Groq (a chave de API fica armazenada em variáveis de ambiente)
-# Para testes locais basta definir: os.environ["GROQ_API_KEY"] = "sua_chave_aqui"
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 def extrair_texto_fatura(caminho_pdf: str) -> str:
@@ -21,38 +19,46 @@ def extrair_texto_fatura(caminho_pdf: str) -> str:
                 
     return texto_completo
 
-def classificar_itens_com_ia(texto_fatura: str) -> Dict[str, Any]:
-    prompt_sistema = """
-    Você é um Despachante Alfandegário Especialista em Classificação Fiscal Internacional (Sistema Harmonizado - HS Code e NCM/Taric).
-    Sua tarefa é analisar o texto de uma Commercial Invoice, extrair a lista de produtos e determinar a classificação fiscal mais adequada para cada item.
+def classificar_itens_com_ia(texto_fatura: str, modal: str = "AÉREO") -> Dict[str, Any]:
+    prompt_sistema = f"""
+    Você é um Despachante e Especialista Logístico Multimodal em Classificação Fiscal (HS Code/NCM) e Compliance de Carga Perigosa.
+    O modal de transporte selecionado para este embarque é: **{modal}**.
 
-    Regras Importantes:
-    - Responda EXCLUSIVAMENTE em formato JSON válido, sem textos antes ou depois.
-    - Estrutura JSON exata esperada:
-    {
-      "fatura_num": "número da fatura aqui",
-      "fornecedor": "nome do fornecedor aqui",
+    Sua missão é analisar o texto da Commercial Invoice / Packing List e retornar as classificações fiscais e alertas de compliance.
+
+    Regras de Análise por Modal:
+    - Se Modal == "AÉREO (IATA DGR)": Identifique UN Numbers, Packing Instructions (PI) e restrições de aeronave de passageiros.
+    - Se Modal == "MARÍTIMO (IMDG)": Identifique a Classe de Risco, UN Number e alertas de SEGREGAÇÃO (se produtos incompatíveis estão no mesmo lote).
+    - Se Modal == "RODOVIÁRIO (ADR)": Identifique UN Number, quantidade líquida e aplique a estimativa da Regra dos 1000 Pontos (Isenção ADR 1.1.3.6).
+
+    Responda EXCLUSIVAMENTE em formato JSON válido, seguindo estritamente esta estrutura:
+    {{
+      "fatura_num": "número da fatura",
+      "fornecedor": "nome do fornecedor",
+      "modal_analisado": "{modal}",
       "itens_classificados": [
-        {
+        {{
           "item_num": 1,
-          "descricao_original": "descrição completa do produto",
-          "hs_code_6dig": "código de 6 dígitos ex: 7318.15",
-          "ncm_code_8dig": "código de 8 dígitos ex: 7318.15.00",
+          "descricao_original": "descrição do produto",
+          "hs_code_6dig": "código 6 dígitos ex: 8507.60",
+          "ncm_code_8dig": "código 8 dígitos ex: 8507.60.00",
           "grau_confianca": 95,
-          "justificativa_legal": "motivo técnico da classificação",
-          "alerta_duvida": null
-        }
-      ]
-    }
+          "un_number": "ex: UN 3481 ou N/A",
+          "classe_risco": "ex: Classe 9 ou N/A",
+          "justificativa_legal": "fundamentação da classificação",
+          "alerta_duvida": "alerta específico do modal {modal} ou null se seguro"
+        }}
+      ],
+      "resumo_compliance_modal": "Resumo geral do risco para o transporte {modal} (ex: Carga Aprovada, Alerta de Segregação, Exige Licença Especial)"
+    }}
     """
 
     try:
-        # Chamada à API da Groq (Executa Llama 3.1 na nuvem em tempo real)
         response = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"Analise esta fatura e devolva APENAS o JSON:\n\n{texto_fatura}"}
+                {"role": "user", "content": f"Analise esta fatura para o modal {modal} e devolva APENAS o JSON:\n\n{texto_fatura}"}
             ],
             response_format={"type": "json_object"}
         )
